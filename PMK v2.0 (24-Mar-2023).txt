@@ -1,0 +1,944 @@
+' PMK v2.0 (with integrated CCW capabilities) 24-Mar-2023
+' *******************************************************
+' PMK Keyer Mode:
+'     STANDALONE jumper as desired.
+'     If CCW Shield installed, CCW jumper must be OFF for normal PMK keyer operation.
+' CCW Mode:
+'     CCW Shield must be installed.
+'     CCW jumper must be ON.
+'     The shield's GPS first needs to 'lock', then displays date, time and "CCW Tx Rdy" when ready
+'     PB #5 is the "PTT" switch.
+' ********************************************************
+' PMK Copyright 2022-2023  Dave Benson K1SWL
+' (CCW functionality Copyright 2023  George Heron N2APB)
+' ********************************************************
+' All trademarks referred to in source code and documentation are copyright their respective owners.
+'    This program is free software: you can redistribute it and/or modify'
+'    it under the terms of the GNU General Public License as published by
+'    the Free Software Foundation, either version 3 of the License, or
+'    (at your option) any later version.
+'
+'    This program is distributed in the hope that it will be useful,
+'    but WITHOUT ANY WARRANTY; without even the implied warranty of
+'    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+'    GNU General Public License for more details.
+'
+'    You should have received a copy of the GNU General Public License 
+'    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+' ********************************************************
+
+MM.Startup
+
+INITS                                ' Variable Initialization
+
+VAR RESTORE
+
+Dim Integer Lookup(59) =(128,255,128,128,254,128,128,128,128,128,128,128,128,2,134,86,148,252,124,60,28,12,4,132,196,228,244,128,128,128,128 ,148,50,128,96,136,168,144,64,40,208,8,32,120,176,72,224,160 ,240,104,216,80,16,192,48,24,112,152,184,200)
+
+SetPin GP22,INTH,SUB22, PULLUP       ' Setup for 100ms ISR
+
+'----------- 100ms ISR -------------
+Sub SUB22 :StartOfFrame=1:End Sub
+
+
+'******************************************************
+'    P R O G R A M   E X E C U T I O N   B E G I N S
+
+If Pin(GP19) = 0 Then DisplayMenu : GoTo Idle     ' CCW mode uses GPS and OLED and *not* the GUI
+
+If Pin(GP5) = 1  Then UserInterface               ' PMK "Standalone" Mode uses the GUI
+
+
+' --------------------------------
+'    M A I N   L O O P :  I D L E
+' --------------------------------
+
+IDLE:
+   If Pin(GP19) = 0 Then Time$ = GPS(Time):Text 0,30,GPS(Time)   ' Display the time if in CCW
+   If Pin(GP16) = 0 Then DA = 1
+   If Pin(GP17) = 0 Then DI = 1
+   If DA =1 Or DI=1 Then KEYERlogic                ' Call KeyerLogic to process pending dit/dah
+
+' -----------------------------------------------------
+'    M E S S A G E   M E M O R Y  H A N D L I N G
+
+   If KM=0 Then     ' Message 1-4 from Terminal Mode
+
+   If Pin(GP8)=0 Or Pin(GP10)=0 Or Pin(GP12)=0 Or Pin(GP14)=0 Then
+
+   '----- Message 1 handling
+     If Pin(GP8)= 0 Then
+        Pin(GP9)=1
+        D$ = MSG1$
+        SPEED
+        FORMSTR1
+        STREAM
+        VAR SAVE MSG1$
+        Pin(GP9)=0
+     EndIf
+
+   '----- Message 2 handling
+     If Pin(GP10)=0 Then
+        If Pin(GP19)=1 Then   ' Process SW #2 in normal PMK keyer mode
+           Pin(GP11)=1        ' LED #2 ON
+           D$= MSG2$
+           SPEED
+           QSOCNT= QSOCNT+1
+           VAR SAVE QSOCNT
+           FORMSTR2
+           MSG2$=D$
+           STREAM
+           VAR SAVE MSG2$
+           Pin(GP11)=0        ' LED #2 OFF
+        Else
+           QSOCNT = QSOCNT    ' <====== CCW HOOK (do nothing yet)
+         EndIf
+     EndIf
+
+   '-----  Message 3 handling
+     If Pin(GP12)=0 Then
+        If Pin(GP19)=1 Then   ' Process SW #3 in normal PMK keyer mode
+           Pin(GP13)=1        ' LED #3 ON
+           SPEED
+           STREAM
+           Pin(GP13)=0        ' LED #3 OFF
+        Else
+           QSOCNT = QSOCNT    ' <====== CCW Hook (Nothing for now)
+        EndIf
+     EndIf
+
+   '---- Message 4 Handling
+     If Pin(GP14)= 0 Then
+        If Pin(GP19)=1 Then   ' Process SW #4 in normal PMK keyer mode
+           Pin(GP15)=1        ' LED #4 ON
+           SPEED
+           QSOCNT = QSOCNT - 1
+           VAR SAVE QSOCNT
+           Pause 700
+           Pin(GP15) = 0      ' LED #4 OFF
+        Else
+           ReceiveCCW         ' <====== CCW Hook: Receive CCW bits, play in headphones
+        EndIf
+      EndIf
+
+    EndIf
+  EndIf
+
+  '---------------------
+  ' Press RECORD button.
+
+  If Pin(GP6)=0 Then
+      Pin(GP7)=1
+      RFL=1: KM=1        ' ENABLES KeyerLogic to accumulate a string"
+      B4=0:NOTb4=0:ONESY=0:TWOSEY=0:DONE=0
+      If Onesy=1 And Twosey=1 Then ONESY=0: TWOSEY=0
+  EndIf
+
+  '-----------------
+  ' Pressing button #4 BEFORE entering a message on paddles adds the QSO
+  ' Count to the beginning of the message.  (Needed for ARRL CW Sweepstakes)
+
+   If DONE=1 Then GoTo Skip8
+
+   If RFL=1 Then
+      Do
+         If Pin(GP14) = 0 Then      ' Button #4 pressed
+            Pin(GP15)=1             ' Turn on LED #4
+            Pause 500
+            Pin(GP15)=0             ' Turn off LED #4
+            B4=1
+         EndIf
+      Loop Until Pin(GP16)=0 Or Pin(GP17)=0
+   EndIf
+
+SKIP8:
+   DONE =1
+
+  '-------------------------------------------------------------
+  ' Poll until Button #1 or #2 is pressed. (Sensing the 'After' press.)
+
+   If RFL=1 Then
+      If Pin(GP14) = 0 Then ' Button #4 pressed
+         Pin(GP15)=1        ' Turn on LED #4
+         Pause 500
+         Pin(GP15)=0        ' Turn off LED #4
+         NOTB4=1
+      EndIf
+   EndIf
+
+   If Pin(GP8) = 0 And RFL=1 Then TRANSFER_1 ' Copies contents of MMSG1$ to Message 1 memory
+   If Pin(GP10)= 0 And RFL=1 Then TRANSFER_2 ' Copies contents of MMSG2$ to Message 2 memory
+
+  '------------
+                            ' <====== CCW HOOK ========
+   If Pin(GP19)=1 Then      ' Only do SN playout question when in normal PMK mode
+      If Pin(GP5)=0 Then    ' *and* only when in STANDALONE mode
+         KM=1
+         If DONE2=0 Then
+            SPEED
+            M3$= "010202000202130002103001100"    ' "RESET SN ?" sent in Morse
+            PLAYBACK_3
+            Timer =0             ' RESET MASTER TIME
+            Do While Timer<3000  ' WAIT FOR paddles inputs for 3 seconds
+               If DA=1 Or DI=1 Then DA=0:DI=0: QSOCNT=0:GoTo SKIP14
+            Loop
+SKIP14:
+         Done2=1
+         EndIf
+      EndIf
+   EndIf
+
+  '-----------------
+   If Pin(GP8)=0 And KM=1 And RFL=0 Then           ' Button #1 plays Msg1
+      Pin(GP9)=1        ' Msg1 LED on
+      SPEED
+      Playback_1        ' Play Msg1
+      Pin(GP9)=0        ' Msg1 LED off
+      Pin(GP7)=0        ' REC LED off
+   EndIf
+
+  '------------------
+   If Pin(GP10)=0 And KM=1 And RFL=0 Then          ' Button #2 plays Msg2
+      Pin(GP11)=1       ' Msg2 LED on
+      QSOCNT= QSOCNT+1
+      VAR SAVE QSOCNT
+      SPEED
+      Playback_2        ' Play Msg2
+      Pin(GP11)=0       ' Msg2 LED off
+      Pin(GP7)=0        ' REC LED off
+   EndIf
+
+  '------------------
+   If Pin(GP12)=0 And KM=1 And RFL=0 Then          ' Button #3 repeats Message #2                                            ' in Standalone Mode
+      Pin(GP13)=1       ' Msg3 LED on
+      SPEED
+      Playback_2        ' Play Msg3
+      Pin(GP13)=0       ' Msg3 LED off
+   EndIf
+
+  '-------------------
+   If Pin(GP14)=0 And KM=1 And RFL=0 Then          ' Button #4 decrements SN
+      Pin(GP15)=1       ' Msg4 LED on
+      QSOCNT=QSOCNT-1
+      Pause 500
+      Pin(GP15)=0       ' Msg4 LED off
+   EndIf
+
+   GoTo IDLE   ' <<<<<<<<<<<<  B A C K   T O   S T A R T   O F   M A I N  L O O P
+
+
+'***********************
+'***********************
+'  S U B R O U T I N E S
+
+'***********************
+
+'*******************
+Sub Playback_1
+
+   For W= 1 To Len(M1$)
+      P$ = Mid$(M1$, W, 1)
+         If P$ ="0" Then DDOUT =0: ELEMENT
+         If P$ ="1" Then DDOUT =1: ELEMENT
+         If P$ ="2" Then Pause (2*DotTime):GoTo skip5
+         If P$= "3" Then Pause (6*DotTime):GoTo skip5
+         If DI=1 Or DA=1 Then  DA=0:DI=0: GoTo SKIP12
+SKIP5:
+   Next W
+   VAR SAVE M1$
+
+Skip12:
+End Sub
+
+'********************
+Sub Playback_2
+
+   If B4=1 Then SSN
+   For W= 1 To Len(M2$)
+      P$ = Mid$(M2$, W, 1)
+        If P$ ="0" Then DDOUT =0: ELEMENT
+        If P$ ="1" Then DDOUT =1: ELEMENT
+        If P$ ="2" Then Pause (2*DotTime):GoTo skip7
+        If P$= "3" Then Pause (6*DotTime):GoTo skip7
+        If DA=1 Or DI=1 Then  DA=0:DI=0: GoTo SKIP13
+  SKIP7:
+   Next W
+   If NOTB4=1 Then SSN
+SKIP13:
+
+End Sub
+
+'*********************
+Sub Playback_3
+
+   For W= 1 To Len(M3$)
+      P$ = Mid$(M3$, W, 1)
+      If P$ ="0" Then DDOUT =0: ELEMENT
+      If P$ ="1" Then DDOUT =1: ELEMENT
+      If P$ ="2" Then Pause (2*DotTime):GoTo skip11
+      If P$= "3" Then Pause (6*DotTime):GoTo skip11
+      If DA=1 Or DI=1 Then DA=0:DI=0:GoTo SKIP15   ' Paddle input.  CLR INTRPTs, abort.
+  SKIP11:
+   Next W
+
+SKIP15:
+End Sub
+
+
+' ***************
+Sub MSGFL            ' Eliminate bogus characters from a string.
+
+   MSGTEMP$ = ""
+A: For X =1 To Len(D$)
+      C$ = Mid$(D$,X,1)
+      If 31 <= Asc(C$) And Asc(C$) >= 90 Then GoTo SKIP1  ' Skip 0-to-1F hex and 5B hex-to-end
+      MSGTEMP$= MSGTEMP$ + C$
+Skip1:
+   Next X
+
+End Sub
+
+'*******************
+Sub Formstr1
+
+   MSGTEMP$=""
+A: For X =1 To Len(D$)
+      C$ = Mid$(D$,X,1)
+      If C$= "#" Then GoTo SKIP15   ' Ignore this character for message #1
+      MSGTEMP$= MSGTEMP$ + C$
+Skip15:
+   Next X
+   MSG1$ = MSGTEMP$
+   D$= MSG1$
+
+End Sub
+
+'*******************
+ Sub formstr2
+
+'  D$ =  MSG2$
+
+      ' Scan Message and finds '#' character in string -------------
+   For W =1 To Len(D$)
+      SNPOS= Instr(D$, "#")     ' Return position at which "#" is found.
+      If SNPOS > 0 Then SNFLAG=1
+   Next W                       ' loop back until end of string
+
+      '  End loop.  If "#" found, branch to string manipulation
+   If SNFLAG =1 Then GoTo Build ' Build must be executed repeatedly as the serial number increments
+   If  SNPOS=0 Then GoTo BYPASS ' No "#" found
+
+BUILD:
+   L_LEN= SNPOS-1               ' Found a "#". remove and replace w/ serial number.
+   Static R_Len= Len(D$)- SNPOS
+   SN$ = Str$(QSOCNT)           ' Serial number (integer) converted to string
+
+Static G$=Left$(D$, L_LEN)
+   H$= G$ + SN$                 ' Add serial number after left side of string. 1st concatenation
+   J$= H$ + Right$(D$, R_LEN)   ' 2nd concatenation. String now complete
+
+BYPASS:
+   If SNFLAG = 1 Then D$ = J$
+End Sub
+
+'******************************
+Sub STREAM     ' Converts encoded Morse character to serial Morse Keyer and audio outputs
+
+   For W = 1 To Len(D$)
+      C$ = Mid$(D$,W,1)
+      LTR = Asc(C$)-31
+      CODE = LOOKUP(LTR)
+      If CODE =255, Then Pause 4*DoTTime: GoTo SKIPPY ' space between words
+      EOCtest = 128
+LOOP1: If  CODE = EOCtest Then GoTo EXIT1
+      CODE=CODE<<1                                    ' shift left 1 bit into bit 8
+      If CODE>256 Then                                ' bit was a '1'
+         DDOUT=1
+         CODE=CODE-256                                ' set bit 8 to zero
+      Else
+         DDOUT=0
+      EndIf
+      ELEMENT
+      If DI=1 Or DA=1 Then DI=0:DA=0: Exit Sub        ' Abort if wrong button pressed. Oops.
+      GoTo LOOP1
+
+EXIT1:        ' add pause at end of character
+      Pause 2*DOTTime
+SKIPPY:
+   Next W
+
+End Sub
+
+'*******************
+Sub SPEED     'Returns speed in WPM
+   SetPin 31, AIN
+   WPM =Int( 8+(9*Pin(31)))
+   If Pin(GP19) = 0 Then WPM = 12                     ' CCW always done at 12 wpm (for now)
+   DotTime =Int(1200/WPM)
+End Sub
+
+'******************
+Sub ELEMENT   ' Plays the Morse element ... ONLY in Memory message playback!
+
+   If DDOUT = 1 Then EL_LEN = 3*DOTTime            'In case of a dash
+   If DDOUT = 0 Then EL_LEN = DOTTIME
+   Pin(GP18) = 1
+   Play TONE 800,800, el_len
+   Pause el_LEN
+   Pin(GP18) = 0
+   ELPAUSE          ' Append SPACE betw. dots/dashes
+
+End Sub
+
+'******************
+Sub ELPAUSE   ' SPACE between dots/dashes
+
+   Pause 1
+   Play Tone hifreq,hifreq,DotTime
+   Pause DotTime
+
+End Sub
+
+'******************
+Sub SERIALNO   ' Inserts the SERIALNO string (from the QSOCNT integer) into Msg2$
+
+   TRIG$ = "#"
+   SNPOS = Instr(D$, TRIG$)
+   If SNPOS= 0 Then GoTo SNEXIT
+   L_LEN= SNPOS-1
+   R_LEN = Len(D$)-SNPOS
+   SN$ = Str$(QSOCNT)      ' Type conversion from (Integer) QSOCNT To String
+
+   G$=Left$(D$, L_LEN)
+   G$= G$ + SN$
+   G$= G$ + Right$(D$, R_LEN)
+   D$ = G$
+   MSG2$=D$
+
+SNEXIT:
+End Sub
+
+'********************************************************************
+'       K E Y E R   L O G I C
+'      Generate a dot or dash
+'
+Sub KEYERlogic
+
+   SPEED
+
+LOOPBACK:
+   If REV=0 Then
+      If DA=0 And DI =1 Then DDOUT=0 : DI=0      ' added 8_10
+      If DA= 1 And DI=0  Then DDOUT=1: DA=0      ' added 8_10
+      If MODE=1 And DA = 1 And DI= 1 Then        ' IAMBIC MODE B
+         DDOUT=INV CC And &B00000001: DI=0: DA=0  ' added 8_10
+      EndIf
+      CC=DDOUT
+   EndIf
+
+   If REV=1 Then
+      If DA=0 And DI =1 Then DDOUT=1: DI=0
+      If DA= 1 And DI=0  Then DDOUT=0:DA=0
+      If DA = 1  And DI=1 And MODE=1  Then        'IAMBIC MODE B
+         DDOUT=INV CC And &B00000001 : DA=0: DI=0  'added 8_10
+      EndIf
+   EndIf
+
+   CC=DDOUT
+   Pin(GP9)=0  ' Turn Msg 1 LED off
+
+    ' ----------------------------------------------------------------------------------------
+    ' If in CCW mode, turn the KEY on during one 100ms frame and off for one 100ms frame (dit)
+    ' or for 3 frames (dah) and then off for one 100ms frame.
+    ' Otherwise in normal PMK mode, activate PMK sound and Key based on the Pause DotTime delay.
+    ' NOTE:  Only handling DITS so far in CCW mode!
+
+   If Pin(GP19) = 0 Then                   ' <====== CCW HOOK: Perform CCW Tx processing
+      If DDOUT = 0 Then
+         CCW_TX_Dit:
+         If StartOfFrame = 0 Then GoTo CCW_TX_Dit ' Wait for the start of a 100ms frame
+         StartOfFrame = 0                     ' Reset the frame start flag
+         Pin(GP15) = Not Pin(GP15)            ' Test bit.  100ms hi, 100ms low when paddling
+         If DitLatch = 1 Then
+            DitLatch = 0
+            Pin(GP18) = 0                     ' Turn Key OFF at start of this (following) 100ms period
+            Play STOP                         ' Turn of tone in headphone
+            GoTo X                            ' Continue onward in normal KEYERlogic subroutine
+         Else
+            DitLatch = 1
+            Pin(GP18) = 1                     ' Turn Key on
+            Play TONE 850,850                 ' Turn on tone in headphone
+            GoTo CCW_TX_Dit
+         EndIf
+      Else
+         CCW_Tx_Dah:
+         If StartOfFrame = 0 Then GoTo CCW_TX_Dah ' Wait for the start of a 100ms frame
+         StartOfFrame = 0                     ' Reset the frame start flag
+         Pin(GP15) = Not Pin(GP15)            ' Test bit.  100ms hi, 100ms low when paddling
+         If DahLatch = 1 Then
+            DahCntr = DahCntr - 1
+            If DahCntr =0 Then                ' Has KEY been on for three frames?
+               DahLatch = 0                   ' Yes
+               Pin(GP18) = 0                  ' Turn OFF at start of this (following) 100ms frame
+               Play STOP                      ' Turn off tone in headphone
+               GoTo X                         ' Continue onward in normal KEYERlogic subroutine
+            Else
+               GoTo CCW_Tx_Dah                ' Go do more dah frames
+            EndIf
+         Else
+            DahLatch =1
+            DahCntr = 3
+            Pin(GP18) = 1                     ' Turn Key on
+            Play TONE 850,850                 ' Turn on tone in headphone
+            GoTo CCW_Tx_Dah
+         EndIf
+      EndIf
+   Else                                    ' <====== END CCW HOOK ========
+
+       ' -------------------------------------------
+       ' Otherwise in normal PMK ...
+       ' Key the transmitter and play the sound in headphones
+
+      If DDOUT = 1 Then MMSG1$= MMSG1$ + "1": EL_LEN = 3*DOTTime 'Dash
+      If DDOUT = 0 Then MMSG1$= MMSG1$ + "0":  EL_LEN = DOTTIME  'Dot
+      Pin(GP18) = 1                 ' KEY on
+      Play TONE 800,800,el_len      ' Sound the dot or dash
+      Pause el_len
+      Pin(GP18) = 0                 ' KEY off
+      Pause DotTime                 ' Inter-element time
+   EndIf
+
+       ' Continue
+X: If Mode=0 Then DA=0:DI=0      ' (Iambic A) clear any dot/dash inputs
+                                 ' arriving during the current character
+   If DA=1 Or DI=1 Then GotTo LOOPBACK
+
+       ' -------------------------------------------
+       ' Detect the length of a gap between elements
+
+   Timer = 0                     ' timer master reset
+
+LOOP2:
+   If Pin(GP16) =0 Or Pin(GP17) = 0 Then GoTo SKIP3
+   If  Int(Timer) >= (10*DotTime) Then GoTo SKIP3                       ' Timeout
+   GoTo LOOP2
+
+'   T2= Int(Timer)   ' ???????? Instruction never accessed?????
+
+SKIP3:
+   If Int(Timer)  >= (10*dottime) Then mmsg1$ = mmSG1$+ "3": GoTo SKIP6 'Timeout
+   T2 = Int(Timer)
+
+   If T2 >= 6* DotTime Then MMSG1$ = MMSG1$ + "3" :GoTo SKIP6           ' Long pause
+   If T2 >=    DotTime Then MMSG1$ = MMSG1$ + "2"                       ' Short pause
+
+SKIP6:
+   If RFL=1 Then GoTo SKIP4
+
+   MMSG1$=""      ' Prevent overflow condition in normal operation
+
+SKIP4:
+   Pin(GP9)=0:DI=0:DA=0
+   If Len(MMSG1$)=253 Then
+      RFL=0 :Pin(GP7)=0 ' overflow safety
+   EndIf
+
+End Sub
+
+'----------------
+' Code table:
+' "0" = DOT
+' "1" = DASH
+' "2" = SHORT PAUSE
+' "3" = LONG PAUSE
+' "4"   (unused)
+' "5" = (unused)
+' "6"   (unused)
+' "7"   (unused)
+' "8"   (unused)
+' "9"   (unused))
+
+
+'******************
+Sub Transfer_1 ' Copies contents of MMSG1$ to Message 1 memory,
+               ' Triggered by pressing Message 1 button in Record Mode
+
+   If ONESY=1  Then GoTo Skip9
+
+   M1$=""                'Go-path executed only once in Record mode.
+   For W= 1 To Len(MMSG1$)
+      P$= Mid$(MMSG1$, W, 1)
+      M1$= M1$ + P$
+   Next W
+SKIP9:
+   Pin(GP7)=0: RFL=0:MMSG1$="": ONESY=1
+
+End Sub
+
+'******************
+Sub Transfer_2 ' Copies contents of MMSG1$ to Message 2 memory
+               'Triggered by pressing Message 2 button in Record mode
+
+   If TWOSEY=1 Or RFL=0 Then GoTo Skip10
+   M2$=""                ' Go-path executed only once in Record mode.
+   For W= 1 To Len(MMSG1$)
+      P$= Mid$(MMSG1$, W, 1)
+      M2$= M2$ + P$
+   Next W
+   Pin(GP7)=0: RFL=0:MMSG1$="": TWOSEY=1
+
+Skip10:
+End Sub
+
+'******************
+Sub SSN         'Standalone mode Serial number
+
+   If KM=1 Then
+      D$ = Str$(QSOCNT) 'convert serial number to String
+   STREAM
+   EndIf
+
+End Sub
+
+'*************************************************************************
+'  U S E R   I N T E R F A C E
+
+Sub UserInterface
+   Print " ----------------------------------------------------------------------"
+   Print "         WELCOME TO THE K1SWL MEMORY KEYER Version 1.0  12-March-2023"
+   Print " ----------------------------------------------------------------------"
+   Print ""
+   Print ""
+   Print ""
+   Print "Press the letter 'N' for notes on setting up the Keyer software"
+   Print """"
+   Input N$
+   If UCase$(N$)="N" Then OPNOTES
+   Print """"
+   Print "Press the letter 'S' for an explanation of Standalone Mode."
+   Print "": Input H$
+   If UCase$(H$) = "S" Then Standalone
+   Print """"""
+   Print
+   Print "'---------------------------------------------------------------"
+   Print """"
+
+   Print "  Enter MESSAGE 1 Text followed by Carriage Return (CR)"
+   Print "  (Press Carriage Return to Skip)"
+   Print "  Your callsign typically goes in this field."
+   Print """"
+   Line Input D$
+   D$= UCase$(D$)                ' returns upper case string
+   If D$ ="" Then GoTo NextQ1
+
+   MSGFL                         ' eliminates bogus characters
+   MSG1$=MSGTEMP$                ' input saved as MSG1$
+   Print MSG1$                   ' and print it
+
+NextQ1:
+   Pause 500
+   Print """"
+   Print " Enter MESSAGE 2 Text followed by Carriage Return (CR)"
+   Print " (Press Carriage Return to Skip)"
+   Print """"""
+   Print "  TO INSERT A SERIAL NUMBER IN A MESSAGE, ENTER A '#' SIGN IN THE"
+   Print "  POSITION WHERE YOU WANT THE NUMBER TO APPEAR. "
+   Print ""
+   Print "  (This is typically at the end of the message)"
+
+   Print """"
+   Print """"""
+   Pause 500
+   Line Input D$
+   D$=UCase$(D$)
+   If D$= "" Then GoTo NextQ2
+   MSGFL                          ' eliminate bogus characters
+   MSG2$=MSGTEMP$                 ' input saved as MSG2$
+   Print MSG2$                    ' and print it
+
+NextQ2:
+   Print """"""
+   Print " Do you need to reset the Serial number count?"
+   Print " (Enter 'Y' or 'N' and CR) This is USUALLY a 'YES'."
+   Print "  If 'NO', the count is restored after a power interruption."
+   Print ""
+   Input CLRCNT$
+   If UCase$(CLRCNT$) = "N" Then GoTo KeepCounting
+   If UCase$(CLRCNT$) = "Y" Then QSOCNT =0
+   Print UCase$(CLRCNT$)
+
+KeepCounting:
+   VAR SAVE QSOCNT
+
+   Print """"""
+   Pause 500
+
+   Print " Do you need to reverse the DOT and DASH Paddles?"
+   Print " (Enter 'Y' or 'N' and CR) This setting is saved through"
+   Print " removal of power. "
+   Print ""
+   Input PDL$
+   If UCase$(PDL$) = "Y" Then
+      Rev=1
+   Else
+      Rev=0
+   EndIf
+   VAR SAVE Rev
+
+   Pause 500
+   Print """"""
+   Print " Do you want Iambic Mode A or mode B?"
+   Print " Mode A: Stops after the current character (preferrred by most)"
+   Print " Mode B: Adds an extra character (i.e., 'Squeeze keying')."
+   Print """"""
+   Print " Type 'A' or 'B'[CR]"
+   Print ""
+   Input IAMB$
+   If UCase$(IAMB$)="B" Then
+      Mode =1
+   Else
+      Mode =0
+   EndIf
+   VAR SAVE MODE
+
+   Print """"""
+   Print "The PMK is now in TERMINAL mode."
+
+SPEED:
+   Print """"""
+
+End Sub
+
+'*************************************************************************
+'  O P E R A T I O N A L   N O T E S
+
+
+Sub OPNOTES:  Print " OPERATIONAL NOTES:"
+   Print """"
+   Print "Before you get rolling, there are several operational steps to complete:"
+   Print ""
+   Print "If you're reading this, you've downloaded and started the software."
+   Print """"
+   Print " Type Cntrl-C to halt program excution. Do this NOW. "
+   Print ""
+   Print "On the Command Line (with the '>' prompt), type OPTION AUDIO GP20,GP21"
+   Print "This enables the Audio Sidetone"
+   Print """"
+   Print "Save the PMK Software in one of the seven memory slots available."
+   Print " Type FLASH SAVE (#) where # is the number you chose."
+   Print ""
+   Print "When the command prompt returns ,Type OPTION AUTORUN (#)."
+   Print " This causes the software to start automatically upon application of power."
+   Print """"
+   Print "Press button F2 on your computer to restart the software."
+   Print """"
+   Print "You're now operational in Terminal mode."
+   Print """"
+End Sub
+
+'*************************************************************************
+'  S T A N D A L O N E   N O T E S
+
+Sub STANDALONE
+   Print ""
+   Print "Standalone Mode is typically used for Portable operation- or for shacks"
+   Print "without a dedicated computer."
+   Print """"
+   Print "To enter Standalone Mode from Terminal Mode, simply Press the Record Button."
+   Print "Its red LED will light and stay lit."
+   Print ""
+   Print "TO ENTER STANDALONE MODE AUTOMATICALLLY ON POWER APPLICATION, ADD A "
+   Print "JUMPER TO J5 (below Pico pins 7/8)"
+   Print ""
+   Print "This assumes you already set up operation in Terminal Mode."
+   Print "The paddle Reverse and Iambic mode selection rarely need to change."
+   Print """As a result, the Standalone dialog will ask only one question in Morse:"
+   Print """"
+   Print "              'RESET SN ?'  (Reset QSO Count?)"
+   Print ""
+   Print " Tap either keyer paddle within 3 seconds to reset the count."
+   Print " (If you're not using the QSO Count in a contest, "
+   Print "  you can ignore the question.)"
+   Print """"""
+   Print "To enter messages #1 and #2 without a QSO Count:"
+   Print """"
+   Print "Enter your intended message on the keyer paddles.  When complete,"
+   Print " press the message #1 or #2 buttons to store a message to either "
+   Print "of those memories. The green message LED will illuminate for 0.5"
+   Print "seconds and the red Record LED will extinguish.  "
+   Print """"
+   Print "To enter a message with a QSO Count:"
+   Print ""
+   Print " For a QSO Count at the START of a message, press message button #4"
+   Print " and THEN enter your message via the keyer paddles. (This feature is"
+   Print "needed for the ARRL CW Seepstakes."
+   Print """"
+   Print " For a QSO Count at the END of the message, enter message via the"
+   Print "keyer paddles and THEN press the message button #4."
+   Print "When complete, press message buttons #1 or #2 to store messages as before."
+   Print """"""
+   Print "Note: The messages entered in Terminal Mode are no longer available once"
+   Print " Standalone Mode is entered."
+End Sub
+
+'****************************
+'****************************
+Sub DisplayMenu        ' (in CCW Mode)
+
+   SetPin GP1,GP0,COM1                     ' Setup for the GPS board
+   Open "COM1:" As GPS,-4                  ' EDT (-4), EST (-5)
+
+   '----------- DISPLAY MENU to OLED ----------
+   CLS
+   Text 0,0,"CCW CONTROLLER "
+   Text 0,48," (Waiting GPS)"
+   Do While (Not GPS(Valid))               ' Wait for GPS sync
+      Loop
+   Date$ = GPS(Date)              ' Grab the current date and display it
+   Text 0,15,Date$
+   Text 00,48,"    CCW Tx Rdy"
+End Sub
+
+'******************
+'******************
+Sub TransmitCCWMsgs     ' Auto sends canned CCW messges (unused for now)
+
+   Pause 200
+   Text 00,48," CCW Auto Tx"
+
+   WaitFrame
+   CCWdit                                ' Send 'R'
+   CCWdah
+   CCWdit
+
+   Pause 500
+   Text 00,48,"    CCW Tx Rdy"
+End Sub
+
+'******************
+Sub CCWdit
+       Pin(GP18)=1                        ' Immediately turn on KEY
+       Play TONE 850,850                  ' Turn on tone in headphones
+       WaitFrame                          ' Wait for next frame (KEY on)
+       Pin(GP18)=0
+       Play STOP                          ' Tone off
+       WaitFrame                          ' Wait for next frame (KEY off)
+End Sub
+
+'******************
+Sub CCWdah
+       Pin(GP18)=1                        ' Immediately turn on KEY
+       Play TONE 850,850                  ' Turn on tone in headphone
+       WaitFrame                          ' Wait for next frame (KEY on)
+       WaitFrame                          ' Wait for next frame (KEY on)
+       WaitFrame                          ' Wait for next frame (KEY on)
+       Pin(GP18)=0
+       Play STOP                          ' Tone off
+       WaitFrame                          ' Wait for next frame (KEY off)
+End Sub
+
+'******************
+Sub WaitFrame
+
+W2: If StartOfFrame = 0 Then GoTo W2      ' Wait for next frame (space frame)
+       StartOfFrame = 0
+
+End Sub
+
+'******************
+'******************
+Sub ReceiveCCW         ' Accessed by toggling the Button #4 "PTT" pushbutton
+
+   ADC OPEN Fs, 2                         ' Only ADC1 (GP27)
+
+   Pause 200
+   Text 00,48," Rx Connected "
+
+   Do While Pin(GP14) = 1                 ' Press Button #4 to stop CCW Receive Mode
+
+      WaitFrame
+
+      ADC start val_y!()
+      Math FFT MAGNITUDE val_y!(), val_l!()
+      For i =1 To 60: val_c(i) = Int(30 * Log( 1 + val_l(I+1)*5 )-5)-3: Next
+
+      If val_c(50) >50 Then               ' Inspect the 800 Hz "sweet spot" cell for tone/no tone
+         Pin(GP15)=1                      ' We got a tone! Indicate with LED #4
+         Play TONE 850,850                ' Turn on tone in headphone
+      Else
+         Pin(GP15)=0                      ' Turn off LED #4 indicator
+         Play STOP                        ' and stop the tone.
+      EndIf
+
+   Loop
+
+   ADC Close
+   Pause 500
+   Text 00,48,"    CCW Tx Rdy"
+
+End Sub
+
+'*****************************************************************
+'      V A R I A B L E   I N I T I A L I Z A T I O N
+
+Sub INITS
+
+SetPin GP5,  DIN, PULLUP        ' Jumper startup in Standalone
+SetPin GP8,  DIN, PULLUP        ' Message #1 pushbutton
+SetPin GP10, DIN, PULLUP        ' Message #2 pushbutton
+SetPin GP12, DIN, PULLUP        ' Message #3 pushbutton
+SetPin GP14, DIN, PULLUP        ' Message #4 pushbutton
+SetPin GP6, DIN, PULLUP         ' Record pushbutton
+
+SetPin GP9,  DOUT               ' Message #1 LED
+SetPin GP11, DOUT               ' Message #2 LED
+SetPin GP13, DOUT               ' Message #3 LED
+SetPin GP15, DOUT               ' Message #4 LED
+SetPin GP7,  DOUT               ' Record LED
+
+SetPin GP18, DOUT: Pin(GP18)=0  ' Keyer output on J3
+SetPin GP16, DIN, PULLUP        ' Paddle RING contact
+SetPin GP17, DIN, PULLUP        ' Paddle TIP  contact
+SetPin GP19, DIN, PULLUP        ' P1: Shield Mode Jumper: PMK(low)/CCW(high)
+SetPin GP5,  DIN, PULLUP        ' P2: Keyer Mode Jumper: Standalone(low)
+
+Dim DI = 0                      ' DIT pending
+Dim DA = 0                      ' DAH pending
+Dim REV =0                      ' Reverse paddles
+Dim DD                          ' Ditdah-  raw output of stream and keyer
+Dim CC =0                       ' Current Character
+Dim MODE =0                     ' 0= Iambic MODE A, 1= Iambic MODE B
+Dim LEN0                        ' Length of Text input string
+Dim LEN1                        ' Length of Serial number string
+Dim DDOUT, WPM
+Dim QSOCNT =0                   ' Initial value of contact Serial number.
+Dim SNFLAG =0
+Dim SNPOS                       ' Position of S/N in test stream. Assigned in FORMSTR
+Dim RFL=0                       ' Record Flag (allows messages to accumulate into PB1/2)
+Dim KM =0                       ' Keyboard Mode (as opposedto Standalone Mode)
+Dim DitLatch =0                 ' Flag indicates dit coming in subsequent window (CCW)
+Dim DahLatch =0                 ' Flag indicates dah coming in subsequent window (CCW)
+Dim StartOfFrame                ' Flag indicates exact Start of Frame, set in 100ms ISR
+Dim DahCntr                     ' Dah requires 3 subsequent frames of Key being on
+
+Dim STRING D$,SN$,G$,MSG1$,MSG2$, MSGTEMP$, MMSG1$,M1$, M2$,M3$
+
+Dim B4,NOTB4, DONE,  ONESY, TWOSEY
+Dim HIFREQ = 19000              'AUDIO SIDETONE in Hz- inaudible during pauses
+Const EOCTEST=128
+Dim CODE UINT16
+
+' Setup ADC for Sampling in CCW mode
+Samples = 255
+Bins = 60
+Fs = 4000
+Dim val_y(Samples) As Float, val_l(samples) As Float
+Dim val_c(60) As Integer, val_d(60) As Integer
+
+End Sub
+
+
+'******************
+Sub MM.STARTUP
+Option DISPLAY 60,100
+End Sub                                                                                                              
